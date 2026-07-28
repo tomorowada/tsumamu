@@ -1,0 +1,468 @@
+<!--
+    Version: 33
+    Description: 背景色のみを黒（#000000）に変更し、視認性を高めたモデル。他のすべてのロジック・グラフィック設定は完全に維持。
+-->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Interactive Sense - Grid Slime</title>
+    <style>
+        html, body {
+            position: fixed;
+            inset: 0;
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000000; /* 完全な黒 */
+            overflow: hidden;
+            overscroll-behavior: none;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="mainCanvas"></canvas>
+
+    <script>
+        let activeTouches = []; 
+        let initialDistance = 0; 
+        let isTwoFingerTouching = false; 
+
+        // 入力イベント
+        window.addEventListener('mousedown', (e) => { 
+            if (e.shiftKey) {
+                activeTouches = [
+                    { x: width / 2 - 120, y: height / 2, id: 'mouse1' },
+                    { x: e.clientX, y: e.clientY, id: 'mouse2' }
+                ];
+            } else {
+                activeTouches = [{ x: e.clientX, y: e.clientY, id: 'mouse1' }]; 
+            }
+            checkInitialTwoFingerDistance();
+        });
+        
+        window.addEventListener('mousemove', (e) => { 
+            if (activeTouches.length > 0) {
+                if (activeTouches.length === 2) {
+                    activeTouches[1] = { x: e.clientX, y: e.clientY, id: 'mouse2' };
+                } else {
+                    activeTouches[0] = { x: e.clientX, y: e.clientY, id: 'mouse1' }; 
+                }
+            }
+        });
+        window.addEventListener('mouseup', () => { activeTouches = []; isTwoFingerTouching = false; });
+        window.addEventListener('mouseleave', () => { activeTouches = []; isTwoFingerTouching = false; });
+
+        function updateTouches(e) {
+            activeTouches = [];
+            for (let i = 0; i < Math.min(e.touches.length, 2); i++) {
+                activeTouches.push({
+                    x: e.touches[i].clientX,
+                    y: e.touches[i].clientY,
+                    id: e.touches[i].identifier
+                });
+            }
+            checkInitialTwoFingerDistance();
+        }
+
+        function checkInitialTwoFingerDistance() {
+            if (activeTouches.length === 2) {
+                if (!isTwoFingerTouching) {
+                    const dx = activeTouches[0].x - activeTouches[1].x;
+                    const dy = activeTouches[0].y - activeTouches[1].y;
+                    initialDistance = Math.hypot(dx, dy);
+                    isTwoFingerTouching = true;
+                }
+            } else {
+                isTwoFingerTouching = false;
+                initialDistance = 0;
+            }
+        }
+
+        window.addEventListener('touchstart', (e) => { e.preventDefault(); updateTouches(e); }, { passive: false });
+        window.addEventListener('touchmove', (e) => { e.preventDefault(); updateTouches(e); }, { passive: false });
+        window.addEventListener('touchend', (e) => { e.preventDefault(); updateTouches(e); }, { passive: false });
+        window.addEventListener('touchcancel', (e) => { e.preventDefault(); updateTouches(e); }, { passive: false });
+
+        // キャンバス設定
+        const canvas = document.getElementById('mainCanvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+
+        function resize() {
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = Math.floor(width * dpr);
+            canvas.height = Math.floor(height * dpr);
+            canvas.style.width = width + 'px';
+            canvas.style.height = height + 'px';
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+
+        // ユーティリティ: 線形補間
+        function lerp(start, end, amt) {
+            return (1 - amt) * start + amt * end;
+        }
+
+        // 個別の球体クラス
+        class GridNode {
+            constructor(id, gridX, gridY, homeX, homeY) {
+                this.id = id;
+                this.gridX = gridX; 
+                this.gridY = gridY;
+                this.homeX = homeX; 
+                this.homeY = homeY;
+                
+                this.x = homeX;
+                this.y = homeY;
+                this.z = 0; // 3D立体度
+                
+                // 物理演算
+                this.vx = 0;
+                this.vy = 0;
+                
+                // 破断時の瞬間的な「プルンプルン」とした衝撃ウォブル
+                this.wobbleX = 0;
+                this.wobbleY = 0;
+                this.wobbleSpeedX = 0;
+                this.wobbleSpeedY = 0;
+                
+                // 心地よいサイズ（5.5）
+                this.baseRadius = 5.5;
+                this.radius = this.baseRadius; // サイズは完全に固定
+                this.color = { r: 255, g: 255, b: 255 };
+                
+                // 個別のテンション蓄積度
+                this.maxTension = 0;
+                
+                this.phase = Math.random() * Math.PI * 2;
+                this.phaseSpeed = 0.01 + Math.random() * 0.005;
+            }
+
+            // ちぎれた瞬間
+            triggerSnapImpact(fromX, fromY) {
+                const dx = this.x - fromX;
+                const dy = this.y - fromY;
+                const dist = Math.hypot(dx, dy) || 1;
+                
+                // ちぎれた方向の真逆へ向かって弾性反発をトリガー
+                const power = 18 + Math.random() * 12;
+                this.wobbleSpeedX = (dx / dist) * power;
+                this.wobbleSpeedY = (dy / dist) * power;
+            }
+
+            update(centerX, centerY, isActivated, targetRatio, viscosity) {
+                // ウォブルの減衰振動
+                const springK = 0.20; 
+                const dampingK = 0.80; 
+                this.wobbleSpeedX += -this.wobbleX * springK;
+                this.wobbleSpeedX *= dampingK;
+                this.wobbleX += this.wobbleSpeedX;
+
+                this.wobbleSpeedY += -this.wobbleY * springK;
+                this.wobbleSpeedY *= dampingK;
+                this.wobbleY += this.wobbleSpeedY;
+
+                if (isActivated) {
+                    // 指への精密な追従
+                    const targetX = lerp(this.homeX, centerX, targetRatio);
+                    const targetY = lerp(this.homeY, centerY, targetRatio);
+
+                    this.x = lerp(this.x, targetX, 0.28);
+                    this.y = lerp(this.y, targetY, 0.28);
+                    
+                    // Z値（隆起）
+                    const targetZ = targetRatio;
+                    this.z = lerp(this.z, targetZ, 0.2);
+
+                    // 球のサイズは完全に固定
+                    this.radius = this.baseRadius;
+
+                    // テンション（maxTension）のみに基づいてダイレクトに黄色化
+                    const yellowFactor = Math.min(1.0, this.maxTension * 2.5);
+
+                    // 接続されている見えない糸の張力に応じた微細な振動
+                    const shakeAmount = lerp(0.0, 4.5, yellowFactor * viscosity) * (1.0 + this.z * 0.5);
+                    this.offsetX = (Math.random() - 0.5) * shakeAmount;
+                    this.offsetY = (Math.random() - 0.5) * shakeAmount;
+
+                    // 色：高感度な yellowFactor に基づいて白（255,255,255）から黄色（255,240,0）へ変化
+                    this.color.r = 255;
+                    this.color.g = Math.floor(lerp(255, 240, yellowFactor));
+                    this.color.b = Math.floor(lerp(255, 0, yellowFactor)); 
+                } else {
+                    // 帰還モード
+                    const dx = this.homeX - this.x;
+                    const dy = this.homeY - this.y;
+                    
+                    this.vx += dx * 0.08;
+                    this.vy += dy * 0.08;
+                    this.vx *= 0.72;
+                    this.vy *= 0.72;
+                    
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    
+                    this.z = lerp(this.z, 0, 0.15);
+                    this.offsetX = 0;
+                    this.offsetY = 0;
+
+                    this.radius = this.baseRadius;
+                    // 白に戻す（r=255は固定なので、gとbを255に戻す）
+                    this.color.g = Math.floor(this.color.g * 0.88 + 255 * 0.12);
+                    this.color.b = Math.floor(this.color.b * 0.88 + 255 * 0.12);
+
+                    // 帰還時のゆらゆら
+                    this.phase += this.phaseSpeed;
+                    this.x += Math.sin(this.phase) * 0.04;
+                    this.y += Math.cos(this.phase) * 0.04;
+                }
+            }
+
+            draw(context) {
+                // 画面外に完全に飛び出しているものは描画計算をスキップ
+                if (this.x + this.wobbleX + this.radius < 0 || 
+                    this.x + this.wobbleX - this.radius > width || 
+                    this.y + this.wobbleY + this.radius < 0 || 
+                    this.y + this.wobbleY - this.radius > height) {
+                    if (this.z < 0.01) return; 
+                }
+
+                context.fillStyle = `rgb(${this.color.r}, ${this.color.g}, ${this.color.b})`;
+                
+                // テンションそのものに応じてネオン発光
+                const yellowFactor = Math.min(1.0, this.maxTension * 2.5);
+                if (yellowFactor > 0.25) {
+                    context.shadowColor = `rgba(255, 245, 0, ${yellowFactor * 0.75})`;
+                    context.shadowBlur = this.radius * 0.9;
+                } else {
+                    context.shadowBlur = 0;
+                }
+
+                context.beginPath();
+                const drawX = this.x + (this.offsetX || 0) + this.wobbleX;
+                const drawY = this.y + (this.offsetY || 0) + this.wobbleY;
+                context.arc(drawX, drawY, this.radius, 0, Math.PI * 2);
+                context.fill();
+            }
+        }
+
+        // 内部的にのみ存在する「非表示の結合（リンク）」クラス
+        class SlimeLink {
+            constructor(nodeA, nodeB) {
+                this.nodeA = nodeA;
+                this.nodeB = nodeB;
+                this.restLength = Math.hypot(nodeA.homeX - nodeB.homeX, nodeA.homeY - nodeB.homeY);
+                this.isBroken = false;
+                this.tension = 0.0;
+                this.breakLimitRatio = 1.3; 
+            }
+
+            update() {
+                if (this.isBroken) return;
+
+                const currentDist = Math.hypot(this.nodeA.x - this.nodeB.x, this.nodeA.y - this.nodeB.y);
+                const stretchRatio = currentDist / this.restLength;
+
+                this.tension = Math.min(1.0, Math.max(0.0, (stretchRatio - 1.0) / (this.breakLimitRatio - 1.0)));
+
+                if (stretchRatio > this.breakLimitRatio) {
+                    this.isBroken = true;
+                    const midpointX = (this.nodeA.x + this.nodeB.x) / 2;
+                    const midpointY = (this.nodeA.y + this.nodeB.y) / 2;
+                    
+                    this.nodeA.triggerSnapImpact(midpointX, midpointY);
+                    this.nodeB.triggerSnapImpact(midpointX, midpointY);
+                }
+            }
+        }
+
+        // 精密ピンチグリッドシステム
+        class ImmutableSizeSystem {
+            constructor() {
+                this.nodes = [];
+                this.links = [];
+                this.viscosity = 0.0; 
+                this.initGrid();
+            }
+
+            initGrid() {
+                this.nodes = [];
+                this.links = [];
+                
+                // 基準となる表示セルの数（少し密度を高めた 9x15）
+                const baseCols = 9; 
+                const baseRows = 15; 
+                
+                // 1セルのピクセル幅（spacing）を計算
+                const spacing = width / (baseCols + 1);
+
+                // グリッド全体の幅と高さを計算
+                const gridWidth = spacing * (baseCols - 1);
+                const gridHeight = spacing * (baseRows - 1);
+
+                // センタリングのオフセットを計算
+                const offsetX = (width - gridWidth) / 2;
+                const offsetY = (height - gridHeight) / 2;
+
+                const extraCells = 3; // 画面外拡張
+
+                let idCounter = 0;
+                for (let r = -extraCells; r < baseRows + extraCells; r++) {
+                    for (let c = -extraCells; c < baseCols + extraCells; c++) {
+                        const homeX = offsetX + spacing * c;
+                        const homeY = offsetY + spacing * r;
+                        this.nodes.push(new GridNode(idCounter++, c, r, homeX, homeY));
+                    }
+                }
+
+                // 近接ノード同士の結合関係を構築
+                for (let i = 0; i < this.nodes.length; i++) {
+                    for (let j = i + 1; j < this.nodes.length; j++) {
+                        const nA = this.nodes[i];
+                        const nB = this.nodes[j];
+                        
+                        const gridDistX = Math.abs(nA.gridX - nB.gridX);
+                        const gridDistY = Math.abs(nA.gridY - nB.gridY);
+
+                        if ((gridDistX === 1 && gridDistY === 0) || 
+                            (gridDistX === 0 && gridDistY === 1) || 
+                            (gridDistX === 1 && gridDistY === 1)) {  
+                            this.links.push(new SlimeLink(nA, nB));
+                        }
+                    }
+                }
+            }
+
+            update(touches) {
+                let isActivated = false;
+
+                if (touches.length === 2 && initialDistance > 10) {
+                    const dx = touches[0].x - touches[1].x;
+                    const dy = touches[0].y - touches[1].y;
+                    const currentDistance = Math.hypot(dx, dy);
+
+                    if (currentDistance < initialDistance) {
+                        const approachRatio = (initialDistance - currentDistance) / initialDistance;
+                        if (approachRatio > 0.05) {
+                            isActivated = true;
+                            this.viscosity = Math.min(1.0, (approachRatio - 0.05) / 0.85);
+                        } else {
+                            this.viscosity = 0.0;
+                        }
+                    } else {
+                        const pullRatio = (currentDistance - initialDistance) / initialDistance;
+                        if (pullRatio > 0.05) {
+                            isActivated = true;
+                            this.viscosity = Math.min(1.0, (pullRatio - 0.05) / 0.85);
+                        } else {
+                            this.viscosity = 0.0;
+                        }
+                    }
+                } else {
+                    this.viscosity = 0.0;
+                    
+                    if (touches.length === 0) {
+                        this.links.forEach(link => {
+                            if (link.isBroken && Math.random() < 0.015) {
+                                link.isBroken = false;
+                                link.tension = 0.0;
+                            }
+                        });
+                    }
+                }
+
+                // リンクの更新
+                this.links.forEach(link => link.update());
+
+                // 各ノードの受ける張力を算出
+                this.nodes.forEach(node => {
+                    node.maxTension = 0;
+                });
+                this.links.forEach(link => {
+                    if (!link.isBroken) {
+                        link.nodeA.maxTension = Math.max(link.nodeA.maxTension, link.tension);
+                        link.nodeB.maxTension = Math.max(link.nodeB.maxTension, link.tension);
+                    }
+                });
+
+                // 各ノードの物理更新
+                for (let i = 0; i < this.nodes.length; i++) {
+                    const node = this.nodes[i];
+
+                    if (isActivated && touches.length === 2) {
+                        const touchA = touches[0];
+                        const touchB = touches[1];
+
+                        const distA = Math.hypot(node.homeX - touchA.x, node.homeY - touchA.y);
+                        const distB = Math.hypot(node.homeX - touchB.x, node.homeY - touchB.y);
+                        
+                        const sumDist = distA + distB;
+                        const weightA = sumDist > 0 ? distB / sumDist : 0.5;
+                        const weightB = sumDist > 0 ? distA / sumDist : 0.5;
+
+                        const nodeTargetX = touchA.x * weightA + touchB.x * weightB;
+                        const nodeTargetY = touchA.y * weightA + touchB.y * weightB;
+
+                        const nodeCenterX = (touchA.x + touchB.x) / 2;
+                        const nodeCenterY = (touchA.y + touchB.y) / 2;
+                        const distToCenter = Math.hypot(nodeCenterX - node.x, nodeCenterY - node.y);
+                        const localInfluence = Math.max(0.0, 1 - (distToCenter / Math.max(width, height) * 1.05)); 
+                        const targetRatio = this.viscosity * localInfluence;
+
+                        node.update(nodeTargetX, nodeTargetY, true, targetRatio, this.viscosity);
+                    } else {
+                        node.update(0, 0, false, 0, 0);
+                    }
+                }
+            }
+
+            draw(context) {
+                // 球体をソートして描画
+                const sortedNodes = [...this.nodes].sort((a, b) => a.z - b.z);
+                context.save();
+                sortedNodes.forEach(node => {
+                    node.draw(context);
+                });
+                context.restore();
+            }
+        }
+
+        let gridSlimeSystem = new ImmutableSizeSystem();
+
+        window.addEventListener('resize', () => {
+            resize();
+            gridSlimeSystem.initGrid();
+        });
+
+        function animate() {
+            // 背景を完全な黒でクリア
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, width, height);
+
+            gridSlimeSystem.update(activeTouches);
+            gridSlimeSystem.draw(ctx);
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
